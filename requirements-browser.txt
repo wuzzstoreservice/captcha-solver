@@ -1,0 +1,5 @@
+# Browser deps for real Turnstile solving (Camoufox).
+# Install after requirements.txt:
+#   pip install -r requirements-browser.txt
+#   python -m camoufox fetch
+camoufox[geoip]>=0.4

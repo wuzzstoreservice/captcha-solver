@@ -1,0 +1,16 @@
+host: 127.0.0.1
+port: 5080
+# Empty = no API key (dev / localhost only)
+api_keys: []
+browser_type: camoufox
+# VPS 4GB: keep at 1
+thread: 1
+headless: true
+proxy_support: true
+task_ttl_seconds: 300
+result_ttl_seconds: 600
+max_queue: 20
+solve_timeout_seconds: 120
+debug: false
+# Optional file with one proxy per line (used when task has no proxy)
+proxies_file: proxies.txt

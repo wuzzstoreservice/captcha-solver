@@ -1,0 +1,21 @@
+[Unit]
+Description=Captcha Solver API (Turnstile)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/captcha-solver
+Environment=PYTHONUNBUFFERED=1
+Environment=CAPTCHA_SOLVER_HOST=127.0.0.1
+Environment=CAPTCHA_SOLVER_PORT=5080
+Environment=CAPTCHA_SOLVER_THREAD=1
+Environment=CAPTCHA_SOLVER_HEADLESS=true
+# Set CAPTCHA_SOLVER_MOCK_SOLVER=true only for smoke without browser
+ExecStart=/root/captcha-solver/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 5080
+Restart=on-failure
+RestartSec=3
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target
