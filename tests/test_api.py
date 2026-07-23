@@ -148,3 +148,58 @@ async def test_v1_missing_sitekey(client):
         return
     body = r.json()
     assert body["errorId"] == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_after_solve(client):
+    r = await client.get("/metrics")
+    assert r.status_code == 200
+    before = r.json()
+    assert before["service"] == "captcha-solver"
+    assert "solves_total" in before
+    assert "latency_ms" in before
+    assert "queue_pending" in before
+
+    create = await client.get(
+        "/turnstile",
+        params={"url": "https://example.com", "sitekey": "0x4AAAA-test"},
+    )
+    task_id = create.json()["taskId"]
+
+    import asyncio
+
+    for _ in range(50):
+        pr = await client.get("/result", params={"id": task_id})
+        if pr.json().get("status") == "ready":
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("task not ready")
+
+    after = (await client.get("/metrics")).json()
+    assert after["solves_total"] >= before["solves_total"] + 1
+    assert after["solves_ok"] >= before.get("solves_ok", 0) + 1
+    assert after["latency_ms"]["count"] >= 1
+    assert "solvers" in after
+    assert "turnstile" in after["solvers"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_unit_counters():
+    from app.metrics import Metrics
+
+    m = Metrics()
+    m.record_ok(elapsed_s=0.12)
+    m.record_ok(elapsed_s=0.2)
+    m.record_fail(timeout=True, elapsed_s=1.0)
+    m.record_queue_reject()
+    m.record_browser_recycle()
+    snap = m.snapshot()
+    assert snap["solves_total"] == 3
+    assert snap["solves_ok"] == 2
+    assert snap["solves_fail"] == 1
+    assert snap["timeouts"] == 1
+    assert snap["queue_rejects"] == 1
+    assert snap["browser_recycles"] == 1
+    assert snap["latency_ms"]["count"] == 3
+    assert snap["success_rate"] == round(2 / 3, 4)

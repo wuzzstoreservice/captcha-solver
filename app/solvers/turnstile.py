@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.metrics import Metrics
 from app.solvers.base import SolveResult
 
 logger = logging.getLogger("captcha-solver.turnstile")
@@ -60,6 +61,8 @@ class TurnstileSolver:
         proxy_support: bool = True,
         proxies_file: Optional[Path] = None,
         solve_timeout: int = 120,
+        recycle_every: int = 50,
+        metrics: Optional[Metrics] = None,
     ) -> None:
         self.thread = max(1, int(thread))
         self.headless = headless
@@ -67,49 +70,108 @@ class TurnstileSolver:
         self.proxy_support = proxy_support
         self.proxies_file = proxies_file
         self.solve_timeout = solve_timeout
+        self.recycle_every = max(0, int(recycle_every))
+        self.metrics = metrics
         self.browser_pool: asyncio.Queue = asyncio.Queue()
         self._camoufox = None
         self._started = False
         self._lock = asyncio.Lock()
+        self._solve_count = 0
+        self._recycle_count = 0
+        self._next_browser_index = 1
+
+    def stats(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "pool_size": self.browser_pool.qsize(),
+            "thread": self.thread,
+            "recycle_every": self.recycle_every,
+            "solve_count": self._solve_count,
+            "recycle_count": self._recycle_count,
+            "started": self._started,
+        }
 
     async def start(self) -> None:
         async with self._lock:
             if self._started:
                 return
-            try:
-                from camoufox.async_api import AsyncCamoufox
-            except ImportError as exc:
-                raise RuntimeError(
-                    "camoufox not installed. Run: pip install -r requirements-browser.txt "
-                    "&& python -m camoufox fetch"
-                ) from exc
+            await self._boot_pool_unlocked()
 
-            logger.info("Starting Camoufox pool (thread=%s headless=%s)", self.thread, self.headless)
-            self._camoufox = AsyncCamoufox(headless=self.headless)
-            for i in range(self.thread):
-                browser = await self._camoufox.start()
-                await self.browser_pool.put((i + 1, browser, {"browser_name": "camoufox"}))
-                if self.debug:
-                    logger.debug("Browser %s ready", i + 1)
-            self._started = True
-            logger.info("Browser pool size=%s", self.browser_pool.qsize())
+    async def _boot_pool_unlocked(self) -> None:
+        try:
+            from camoufox.async_api import AsyncCamoufox
+        except ImportError as exc:
+            raise RuntimeError(
+                "camoufox not installed. Run: pip install -r requirements-browser.txt "
+                "&& python -m camoufox fetch"
+            ) from exc
+
+        logger.info(
+            "Starting Camoufox pool (thread=%s headless=%s recycle_every=%s)",
+            self.thread,
+            self.headless,
+            self.recycle_every,
+        )
+        self._camoufox = AsyncCamoufox(headless=self.headless)
+        for _ in range(self.thread):
+            browser = await self._camoufox.start()
+            idx = self._next_browser_index
+            self._next_browser_index += 1
+            await self.browser_pool.put(
+                (idx, browser, {"browser_name": "camoufox", "uses": 0})
+            )
+            if self.debug:
+                logger.debug("Browser %s ready", idx)
+        self._started = True
+        logger.info("Browser pool size=%s", self.browser_pool.qsize())
 
     async def stop(self) -> None:
         async with self._lock:
             if not self._started:
                 return
-            while not self.browser_pool.empty():
-                try:
-                    index, browser, _ = self.browser_pool.get_nowait()
-                    try:
-                        await browser.close()
-                    except Exception as exc:
-                        logger.warning("Browser %s close failed: %s", index, exc)
-                except asyncio.QueueEmpty:
-                    break
+            await self._drain_pool_unlocked()
             self._camoufox = None
             self._started = False
             logger.info("Turnstile solver stopped")
+
+    async def _drain_pool_unlocked(self) -> None:
+        while not self.browser_pool.empty():
+            try:
+                index, browser, _ = self.browser_pool.get_nowait()
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    logger.warning("Browser %s close failed: %s", index, exc)
+            except asyncio.QueueEmpty:
+                break
+
+    async def _replace_browser(self, index: int, reason: str) -> None:
+        """Close old browser and put a fresh one into the pool."""
+        async with self._lock:
+            if not self._started or self._camoufox is None:
+                return
+            try:
+                browser = await self._camoufox.start()
+            except Exception as exc:
+                logger.error("Failed to spawn replacement browser: %s", exc)
+                # Mark not started so next solve calls start() again
+                self._started = False
+                return
+            new_index = self._next_browser_index
+            self._next_browser_index += 1
+            self._recycle_count += 1
+            if self.metrics is not None:
+                self.metrics.record_browser_recycle()
+            await self.browser_pool.put(
+                (new_index, browser, {"browser_name": "camoufox", "uses": 0})
+            )
+            logger.warning(
+                "Browser %s recycled -> %s reason=%s total_recycles=%s",
+                index,
+                new_index,
+                reason,
+                self._recycle_count,
+            )
 
     def _select_file_proxy(self) -> Optional[str]:
         if not self.proxy_support or not self.proxies_file:
@@ -372,8 +434,10 @@ class TurnstileSolver:
         start_time = time.time()
         index, browser, browser_config = await self.browser_pool.get()
         context = None
+        recycle_reason: Optional[str] = None
         try:
             if hasattr(browser, "is_connected") and not browser.is_connected():
+                recycle_reason = "disconnected-precheck"
                 raise RuntimeError("browser disconnected")
 
             context, page = await self._create_context(browser, proxy, index)
@@ -425,11 +489,17 @@ class TurnstileSolver:
 
                     if tokens:
                         elapsed = round(time.time() - start_time, 3)
+                        self._solve_count += 1
+                        uses = int(browser_config.get("uses") or 0) + 1
+                        browser_config["uses"] = uses
+                        if self.recycle_every and uses >= self.recycle_every:
+                            recycle_reason = f"uses>={self.recycle_every}"
                         logger.info(
-                            "Browser %s solved turnstile in %ss token=%s...",
+                            "Browser %s solved turnstile in %ss token=%s... uses=%s",
                             index,
                             elapsed,
                             tokens[0][:10],
+                            uses,
                         )
                         return SolveResult(token=tokens[0], elapsed_time=elapsed)
 
@@ -445,6 +515,12 @@ class TurnstileSolver:
 
             elapsed = round(time.time() - start_time, 3)
             raise TimeoutError(f"Turnstile not solved in {elapsed}s")
+        except Exception as exc:
+            # If browser died mid-solve, force recycle
+            msg = str(exc).lower()
+            if "disconnect" in msg or "target closed" in msg or "browser has been closed" in msg:
+                recycle_reason = recycle_reason or "disconnect-error"
+            raise
         finally:
             if context is not None:
                 try:
@@ -452,10 +528,29 @@ class TurnstileSolver:
                 except Exception as exc:
                     if self.debug:
                         logger.debug("Browser %s context close: %s", index, exc)
+
+            disconnected = False
             try:
                 if hasattr(browser, "is_connected") and not browser.is_connected():
-                    logger.warning("Browser %s disconnected; not returning to pool", index)
-                else:
+                    disconnected = True
+            except Exception:
+                disconnected = True
+
+            if disconnected:
+                recycle_reason = recycle_reason or "disconnected-post"
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                await self._replace_browser(index, recycle_reason)
+            elif recycle_reason:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                await self._replace_browser(index, recycle_reason)
+            else:
+                try:
                     await self.browser_pool.put((index, browser, browser_config))
-            except Exception as exc:
-                logger.warning("Browser %s return to pool failed: %s", index, exc)
+                except Exception as exc:
+                    logger.warning("Browser %s return to pool failed: %s", index, exc)

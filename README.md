@@ -64,10 +64,29 @@ Environment variables (prefix `CAPTCHA_SOLVER_`):
 | `HEADLESS` | `true` | |
 | `DEBUG` | `false` | |
 | `MOCK_SOLVER` | `false` | unit tests / CI |
+| `BROWSER_RECYCLE_EVERY` | `50` | recycle Camoufox after N uses (0=off) |
 | `SOLVE_TIMEOUT_SECONDS` | `120` | |
 | `MAX_QUEUE` | `20` | 429 when full |
 
 Optional `config.yaml` (see `config.example.yaml`). Optional `proxies.txt` (one proxy per line) when task has no `proxy`.
+
+## Metrics
+
+```bash
+curl -s http://127.0.0.1:5080/metrics
+```
+
+Returns queue depth, success/fail counters, latency p50/p95, browser recycle count, and per-solver stats.
+
+## PM2
+
+```bash
+pm2 start ecosystem.config.cjs
+pm2 logs captcha-solver
+pm2 restart captcha-solver
+```
+
+Systemd unit under `systemd/` is optional; this host prefers PM2.
 
 ## Usage
 

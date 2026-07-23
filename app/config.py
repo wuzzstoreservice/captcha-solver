@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     solve_timeout_seconds: int = 120
     debug: bool = False
     proxies_file: str = "proxies.txt"
+    # Recycle Camoufox browser after N successful pool returns (0 = never by count)
+    browser_recycle_every: int = 50
     # If true, skip Camoufox and use mock solver (tests / CI)
     mock_solver: bool = False
 

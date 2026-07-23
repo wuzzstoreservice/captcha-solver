@@ -11,6 +11,8 @@ task_ttl_seconds: 300
 result_ttl_seconds: 600
 max_queue: 20
 solve_timeout_seconds: 120
+# Recycle Camoufox after N successful uses (0 = never)
+browser_recycle_every: 50
 debug: false
 # Optional file with one proxy per line (used when task has no proxy)
 proxies_file: proxies.txt

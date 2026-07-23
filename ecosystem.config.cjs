@@ -14,6 +14,8 @@ module.exports = {
         CAPTCHA_SOLVER_THREAD: '1',
         CAPTCHA_SOLVER_HEADLESS: 'true',
         CAPTCHA_SOLVER_MOCK_SOLVER: 'false',
+        CAPTCHA_SOLVER_FORCE_REAL: '1',
+        CAPTCHA_SOLVER_BROWSER_RECYCLE_EVERY: '50',
       },
     },
   ],

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app import __version__
 from app.api import health, legacy, v1
 from app.config import Settings, get_settings, load_yaml_overrides
+from app.metrics import Metrics
 from app.queue.worker_pool import WorkerPool
 from app.solvers.base import BaseSolver
 from app.solvers.mock import MockTurnstileSolver
@@ -22,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger("captcha-solver")
 
 
-def build_solvers(settings: Settings) -> Dict[str, BaseSolver]:
+def build_solvers(settings: Settings, metrics: Metrics | None = None) -> Dict[str, BaseSolver]:
     if settings.mock_solver:
         logger.warning("Using MOCK turnstile solver")
         return {"turnstile": MockTurnstileSolver()}
@@ -34,6 +35,8 @@ def build_solvers(settings: Settings) -> Dict[str, BaseSolver]:
             proxy_support=settings.proxy_support,
             proxies_file=settings.proxies_path,
             solve_timeout=settings.solve_timeout_seconds,
+            recycle_every=settings.browser_recycle_every,
+            metrics=metrics,
         )
     }
 
@@ -46,26 +49,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = ResultStore()
         await store.init()
-        solvers = build_solvers(settings)
+        metrics = Metrics()
+        solvers = build_solvers(settings, metrics=metrics)
         pool = WorkerPool(
             store,
             solvers,
             concurrency=settings.thread,
             max_queue=settings.max_queue,
             solve_timeout=settings.solve_timeout_seconds,
+            metrics=metrics,
         )
         app.state.settings = settings
         app.state.store = store
         app.state.pool = pool
+        app.state.metrics = metrics
         app.state.mock_solver = settings.mock_solver
         await pool.start()
         logger.info(
-            "captcha-solver v%s listening config host=%s port=%s thread=%s mock=%s",
+            "captcha-solver v%s listening config host=%s port=%s thread=%s mock=%s recycle_every=%s",
             __version__,
             settings.host,
             settings.port,
             settings.thread,
             settings.mock_solver,
+            settings.browser_recycle_every,
         )
         try:
             yield
